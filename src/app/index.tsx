@@ -1,8 +1,12 @@
 import * as Clipboard from 'expo-clipboard';
+import * as ImagePicker from 'expo-image-picker';
 import { Link, Stack, router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActionSheetIOS,
   ActivityIndicator,
+  Alert,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -14,7 +18,9 @@ import {
 } from 'react-native';
 
 import { DetectedLanguage } from '../api/libretranslate';
-import { AUTO, useApp } from '../state/AppContext';
+import { linesToText } from '../offline/ocrText';
+import { Engine } from '../offline/translator';
+import { AUTO, deviceTranslator, textRecognizer, useApp } from '../state/AppContext';
 import { Theme, useTheme } from '../theme';
 
 const DEBOUNCE_MS = 600;
@@ -22,7 +28,7 @@ const DEBOUNCE_MS = 600;
 export default function TranslateScreen() {
   const theme = useTheme();
   const styles = useMemo(() => makeStyles(theme), [theme]);
-  const { client, prefs, updatePrefs, languageName, serverSettings, status, statusError, addHistory, history, reloadServer } =
+  const { translate: translateText, prefs, updatePrefs, languageName, serverSettings, status, statusError, addHistory, history, reloadServer } =
     useApp();
   const { historyId } = useLocalSearchParams<{ historyId?: string }>();
 
@@ -33,6 +39,9 @@ export default function TranslateScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [copied, setCopied] = useState(false);
+  const [engine, setEngine] = useState<Engine>();
+  const [photo, setPhoto] = useState<string>();
+  const [scanning, setScanning] = useState(false);
   const requestId = useRef(0);
 
   const charLimit = serverSettings?.charLimit ?? -1;
@@ -72,7 +81,7 @@ export default function TranslateScreen() {
       setBusy(true);
       setError(undefined);
       try {
-        const result = await client.translate({
+        const result = await translateText({
           q,
           source: prefs.source,
           target: prefs.target,
@@ -82,6 +91,7 @@ export default function TranslateScreen() {
         setOutput(result.translatedText);
         setAlternatives(result.alternatives ?? []);
         setDetected(result.detectedLanguage);
+        setEngine(result.engine);
         addHistory({
           source: prefs.source === AUTO ? (result.detectedLanguage?.language ?? AUTO) : prefs.source,
           target: prefs.target,
@@ -95,7 +105,7 @@ export default function TranslateScreen() {
         if (id === requestId.current) setBusy(false);
       }
     },
-    [client, prefs.source, prefs.target, prefs.alternatives, charLimit, addHistory],
+    [translateText, prefs.source, prefs.target, prefs.alternatives, charLimit, addHistory],
   );
 
   // Auto-translate while typing, and re-translate when languages or server change.
@@ -126,7 +136,68 @@ export default function TranslateScreen() {
     setTimeout(() => setCopied(false), 1500);
   };
 
+  const scanImage = async (from: 'camera' | 'library') => {
+    if (!textRecognizer) return;
+    try {
+      const permission =
+        from === 'camera'
+          ? await ImagePicker.requestCameraPermissionsAsync()
+          : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert(
+          from === 'camera' ? 'Camera access is off' : 'Photo access is off',
+          'Allow access in the Settings app to translate text from photos.',
+        );
+        return;
+      }
+      const options: ImagePicker.ImagePickerOptions = { mediaTypes: ['images'], quality: 1 };
+      const picked =
+        from === 'camera' ? await ImagePicker.launchCameraAsync(options) : await ImagePicker.launchImageLibraryAsync(options);
+      if (picked.canceled || !picked.assets[0]) return;
+
+      const uri = picked.assets[0].uri;
+      setScanning(true);
+      setError(undefined);
+      setPhoto(uri);
+      const lines = await textRecognizer.recognizeText(uri, prefs.source === AUTO ? [] : [prefs.source]);
+      const text = linesToText(lines);
+      if (!text) {
+        setError('No text found in this photo.');
+        return;
+      }
+      setInput(text);
+      // With auto-translate off, translate right away: the user picked a photo to translate it.
+      if (!prefs.autoTranslate) translate(text);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const pickImageSource = () => {
+    const choices = ['Take Photo', 'Choose from Library', 'Cancel'];
+    const onChoice = (i: number) => {
+      if (i === 0) scanImage('camera');
+      if (i === 1) scanImage('library');
+    };
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        { options: choices, cancelButtonIndex: 2, title: 'Translate text in a photo' },
+        onChoice,
+      );
+    } else {
+      Alert.alert('Translate text in a photo', undefined, [
+        { text: choices[0], onPress: () => onChoice(0) },
+        { text: choices[1], onPress: () => onChoice(1) },
+        { text: choices[2], style: 'cancel' },
+      ]);
+    }
+  };
+
   const clear = () => {
+    setPhoto(undefined);
+    setEngine(undefined);
     setInput('');
     setOutput('');
     setAlternatives([]);
@@ -161,6 +232,9 @@ export default function TranslateScreen() {
           <Pressable style={styles.banner} onPress={() => router.push('/settings')}>
             <Text style={styles.bannerTitle}>Can't connect to the server</Text>
             <Text style={styles.bannerText}>{statusError}</Text>
+            {deviceTranslator && prefs.offlineFallback && (
+              <Text style={styles.bannerText}>Downloaded languages still translate on this device.</Text>
+            )}
             <Text style={styles.bannerLink}>Open Settings</Text>
           </Pressable>
         )}
@@ -194,6 +268,17 @@ export default function TranslateScreen() {
         </View>
 
         <View style={styles.card}>
+          {photo && (
+            <View style={styles.photoRow}>
+              <Image source={{ uri: photo }} style={styles.photo} accessibilityLabel="Scanned photo" />
+              <Text style={[styles.muted, { flex: 1 }]}>{scanning ? 'Reading text…' : 'Text from photo'}</Text>
+              {scanning ? (
+                <ActivityIndicator color={theme.muted} />
+              ) : (
+                <SmallButton label="Remove" onPress={() => setPhoto(undefined)} styles={styles} />
+              )}
+            </View>
+          )}
           <TextInput
             style={styles.input}
             value={input}
@@ -209,6 +294,9 @@ export default function TranslateScreen() {
               {charLimit > 0 ? `${input.length} / ${charLimit}` : `${input.length}`}
             </Text>
             <View style={styles.actions}>
+              {textRecognizer && (
+                <SmallButton label={scanning ? 'Reading…' : 'Photo'} onPress={pickImageSource} styles={styles} />
+              )}
               {input ? (
                 <SmallButton label="Clear" onPress={clear} styles={styles} />
               ) : (
@@ -242,7 +330,10 @@ export default function TranslateScreen() {
             </Text>
           )}
           <View style={styles.cardFooter}>
-            <View>{busy && output ? <ActivityIndicator size="small" color={theme.muted} /> : null}</View>
+            <View style={styles.actions}>
+              {busy && output ? <ActivityIndicator size="small" color={theme.muted} /> : null}
+              {!busy && output && engine === 'device' ? <Text style={styles.muted}>Translated on device</Text> : null}
+            </View>
             {output ? <SmallButton label={copied ? 'Copied' : 'Copy'} onPress={copy} styles={styles} /> : null}
           </View>
         </View>
@@ -304,6 +395,8 @@ function SmallButton({ label, onPress, styles }: { label: string; onPress: () =>
 function makeStyles(t: Theme) {
   return StyleSheet.create({
     container: { padding: 16, gap: 12 },
+    photoRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    photo: { width: 48, height: 48, borderRadius: 8, backgroundColor: t.chip },
     headerButton: { color: t.accent, fontSize: 17 },
     banner: { backgroundColor: t.card, borderRadius: 12, padding: 14, borderLeftWidth: 4, borderLeftColor: t.danger, gap: 4 },
     bannerTitle: { color: t.text, fontWeight: '600', fontSize: 15 },

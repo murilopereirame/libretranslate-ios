@@ -1,3 +1,4 @@
+import { Link } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -12,7 +13,7 @@ import {
 } from 'react-native';
 
 import { LibreTranslateClient, normalizeBaseUrl } from '../api/libretranslate';
-import { DEFAULT_SERVER_URL, useApp } from '../state/AppContext';
+import { DEFAULT_SERVER_URL, deviceTranslator, useApp } from '../state/AppContext';
 import { Theme, useTheme } from '../theme';
 
 type TestResult = { ok: boolean; message: string };
@@ -161,6 +162,38 @@ export default function SettingsScreen() {
           ))}
         </View>
       </View>
+
+      <Text style={styles.section}>Offline translation</Text>
+      {deviceTranslator ? (
+        <>
+          <View style={styles.card}>
+            <Link href="/offline" asChild>
+              <Pressable style={styles.rowBetween} accessibilityRole="button">
+                <Text style={styles.rowLabel}>Offline languages</Text>
+                <Text style={styles.rowValue}>›</Text>
+              </Pressable>
+            </Link>
+            <View style={styles.divider} />
+            <View style={styles.rowBetween}>
+              <Text style={[styles.rowLabel, { flex: 1 }]}>Translate offline when the server can't be reached</Text>
+              <Switch value={prefs.offlineFallback} onValueChange={(v) => updatePrefs({ offlineFallback: v })} />
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.rowBetween}>
+              <Text style={[styles.rowLabel, { flex: 1 }]}>Always use downloaded languages</Text>
+              <Switch value={prefs.preferOnDevice} onValueChange={(v) => updatePrefs({ preferOnDevice: v })} />
+            </View>
+          </View>
+          <Text style={styles.hint}>
+            Downloaded languages translate on this iPhone with Apple's models. Turn on "Always use downloaded languages" to
+            skip the server for them, which is faster and works without a connection.
+          </Text>
+        </>
+      ) : (
+        <Text style={styles.hint}>
+          Offline translation needs iOS 18 or later and a development or App Store build (not Expo Go or the web).
+        </Text>
+      )}
     </ScrollView>
   );
 }
