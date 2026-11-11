@@ -1,0 +1,8 @@
+{
+  "name": "on-device-language",
+  "version": "1.0.0",
+  "description": "On-device text recognition (Vision), language detection (NaturalLanguage) and translation (Apple Translation) for the app",
+  "license": "MIT",
+  "private": true,
+  "main": "index.ts"
+}

@@ -1,9 +1,22 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
-import { Language, LibreTranslateClient, ServerSettings, normalizeBaseUrl } from '../api/libretranslate';
+import { OnDeviceLanguage } from '../../modules/on-device-language';
+import {
+  Language,
+  LibreTranslateClient,
+  ServerSettings,
+  TranslateParams,
+  normalizeBaseUrl,
+} from '../api/libretranslate';
+import { AUTO, RoutedResult, translateRouted } from '../offline/translator';
 import { getJSON, getJSONArray, getSecret, setJSON, setSecret } from './storage';
 
-export const AUTO = 'auto';
+export { AUTO };
+
+/** On-device translation, when this build and iOS version support it. */
+export const deviceTranslator = OnDeviceLanguage?.isTranslationAvailable() ? OnDeviceLanguage : null;
+/** On-device text recognition (photos), when this build includes it. */
+export const textRecognizer = OnDeviceLanguage;
 export const DEFAULT_SERVER_URL = 'https://libretranslate.com';
 const MAX_HISTORY = 50;
 
@@ -15,6 +28,10 @@ export type Preferences = {
   alternatives: number;
   source: string;
   target: string;
+  /** Translate on the device when the server can't be reached. */
+  offlineFallback: boolean;
+  /** Use on-device translation first for downloaded languages. */
+  preferOnDevice: boolean;
 };
 
 export type HistoryEntry = {
@@ -32,6 +49,8 @@ const DEFAULT_PREFS: Preferences = {
   alternatives: 0,
   source: AUTO,
   target: 'en',
+  offlineFallback: true,
+  preferOnDevice: false,
 };
 
 const PREFS_KEY = 'lt.prefs';
@@ -45,7 +64,12 @@ type AppState = {
   prefs: Preferences;
   apiKey: string;
   client: LibreTranslateClient;
+  /** Server languages, or the on-device ones when the server can't be reached. */
   languages: Language[];
+  /** Languages Apple's on-device translation supports (empty when unavailable). */
+  deviceLanguages: Language[];
+  /** Translate with the server, or on the device when offline / preferred. */
+  translate: (params: TranslateParams) => Promise<RoutedResult>;
   serverSettings?: ServerSettings;
   status: ServerStatus;
   statusError?: string;
@@ -69,6 +93,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<ServerStatus>('idle');
   const [statusError, setStatusError] = useState<string>();
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [deviceLanguages, setDeviceLanguages] = useState<Language[]>([]);
+
+  useEffect(() => {
+    if (!deviceTranslator) return;
+    deviceTranslator
+      .supportedLanguages()
+      .then((list) => {
+        const codes = list.map((l) => l.code);
+        setDeviceLanguages(
+          list
+            .map((l) => ({ code: l.code, name: l.name, targets: codes.filter((c) => c !== l.code) }))
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+      })
+      .catch(() => {});
+  }, []);
 
   // Load saved settings once at startup.
   useEffect(() => {
@@ -156,12 +196,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setJSON(HISTORY_KEY, []).catch(() => {});
   }, []);
 
+  // Offline, the pickers show the languages the device can translate instead.
+  const availableLanguages = languages.length ? languages : deviceLanguages;
+
   const languageName = useCallback(
     (code: string) => {
       if (code === AUTO) return 'Detect language';
-      return languages.find((l) => l.code === code)?.name ?? code.toUpperCase();
+      return (
+        languages.find((l) => l.code === code)?.name ??
+        deviceLanguages.find((l) => l.code === code)?.name ??
+        code.toUpperCase()
+      );
     },
-    [languages],
+    [languages, deviceLanguages],
+  );
+
+  const translate = useCallback(
+    (params: TranslateParams) =>
+      translateRouted(params, (p) => client.translate(p), deviceTranslator, {
+        fallback: prefs.offlineFallback,
+        preferDevice: prefs.preferOnDevice,
+      }),
+    [client, prefs.offlineFallback, prefs.preferOnDevice],
   );
 
   const value: AppState = {
@@ -169,7 +225,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     prefs,
     apiKey,
     client,
-    languages,
+    languages: availableLanguages,
+    deviceLanguages,
+    translate,
     serverSettings,
     status,
     statusError,

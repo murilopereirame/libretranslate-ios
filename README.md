@@ -13,6 +13,8 @@ A React Native (Expo) app for any [LibreTranslate](https://github.com/LibreTrans
 - History of recent translations (stored on device)
 - Settings: server URL, optional API key (saved in the iOS Keychain), "Test connection"
 - Light and dark mode
+- Translate text in photos: take a photo or pick one, the text is read on the device (Apple Vision) and translated
+- Offline translation for languages you download (Apple's on-device Translation, iOS 18+): used automatically when the server can't be reached, or always for downloaded languages if you turn that on
 
 ## API endpoints used
 
@@ -38,6 +40,17 @@ Open **Settings** in the app and enter your server URL, e.g. `http://192.168.1.1
 
 To run your own server: `docker run -ti --rm -p 5000:5000 libretranslate/libretranslate`
 
+### Photos and offline translation need a development build
+
+Text recognition and offline translation live in a small native module in `modules/on-device-language` (Swift: Vision, NaturalLanguage and Apple's Translation framework). Expo Go doesn't include it, so the Photo button and the Offline languages screen are hidden there. Use a development build instead:
+
+```bash
+npx expo run:ios                                    # Mac + Xcode
+npx eas-cli@latest build --profile development -p ios   # or in the cloud
+```
+
+Offline translation needs iOS 18 or later. Downloaded languages are managed by iOS: remove them in the Settings app under Apps › Translate › Downloaded Languages.
+
 ## Build for TestFlight / the App Store
 
 ```bash
@@ -60,4 +73,7 @@ Code layout:
 
 - `src/api/libretranslate.ts`: typed API client
 - `src/state/AppContext.tsx`: settings, language list, history
-- `src/app/`: screens (Expo Router): `index` (translate), `languages`, `history`, `settings`
+- `src/app/`: screens (Expo Router): `index` (translate), `languages`, `history`, `settings`, `offline` (offline languages)
+- `src/offline/translator.ts`: picks the server or the device for each translation
+- `src/offline/ocrText.ts`: turns recognized lines from a photo into paragraphs
+- `modules/on-device-language/`: native iOS module (text recognition, language detection, on-device translation)
